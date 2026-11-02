@@ -427,7 +427,7 @@ function PageIntro({
               {money(summary.fixedExpenseCents)}
             </p>
             <p className="mt-1 text-xs text-slate-500">
-              Obligaciones mensuales registradas
+              Reserva mensual, incluyendo pagos anuales prorrateados
             </p>
           </div>
           <div>
@@ -2142,14 +2142,18 @@ function RecurringExpensesPage() {
   const [concept, setConcept] = useState("");
   const [amount, setAmount] = useState("");
   const [category, setCategory] = useState("Internet");
+  const [frequency, setFrequency] = useState<"monthly" | "annual">("monthly");
   const [day, setDay] = useState("1");
+  const [month, setMonth] = useState("1");
   const [accountId, setAccountId] = useState("");
   const [description, setDescription] = useState("");
   const resetForm = () => {
     setConcept("");
     setAmount("");
     setCategory("Internet");
+    setFrequency("monthly");
     setDay("1");
+    setMonth("1");
     setAccountId("");
     setDescription("");
     setEditing(null);
@@ -2160,7 +2164,9 @@ function RecurringExpensesPage() {
     setConcept(item.concept);
     setAmount((item.amountCents / 100).toFixed(2));
     setCategory(item.category);
+    setFrequency(item.frequency ?? "monthly");
     setDay(String(item.dayOfMonth ?? 1));
+    setMonth(String(item.monthOfYear ?? 1));
     setAccountId(item.accountId ?? "");
     setDescription(item.description ?? "");
     setForm(true);
@@ -2172,13 +2178,21 @@ function RecurringExpensesPage() {
       concept,
       amountCents,
       category,
-      frequency: "monthly",
+      frequency,
       dayOfMonth: Number(day),
+      ...(frequency === "annual" ? { monthOfYear: Number(month) } : {}),
       accountId: accountId || undefined,
       active: editing?.active ?? true,
       description: description || undefined,
     } as const;
-    if (!concept || !amount || amountCents <= 0 || Number(day) < 1 || Number(day) > 31) return;
+    if (
+      !concept ||
+      !amount ||
+      amountCents <= 0 ||
+      Number(day) < 1 ||
+      Number(day) > 31 ||
+      (frequency === "annual" && (Number(month) < 1 || Number(month) > 12))
+    ) return;
     if (editing) await updateRecurringExpense(editing.id, value);
     else await addRecurringExpense(value);
     resetForm();
@@ -2210,7 +2224,7 @@ function RecurringExpensesPage() {
       <PageIntro
         eyebrow="Compromisos"
         title="Gastos fijos"
-        text="Registra obligaciones mensuales para reservarlas en tus decisiones, sin crear un pago que todavía no ocurrió."
+        text="Registra obligaciones mensuales o anuales para reservarlas en tus decisiones, sin crear un pago que todavía no ocurrió."
         action={
           <button className="btn-primary" onClick={() => { if (form) resetForm(); else setForm(true); }}>
             <Plus size={17} />
@@ -2234,7 +2248,7 @@ function RecurringExpensesPage() {
                 placeholder="Internet"
               />
             </Field>
-            <Field label="Monto mensual aproximado (USD)">
+            <Field label={`Monto ${frequency === "annual" ? "anual" : "mensual"} (USD)`}>
               <input
                 className="input"
                 required
@@ -2245,6 +2259,12 @@ function RecurringExpensesPage() {
                 onChange={(e) => setAmount(e.target.value)}
                 placeholder="26.50"
               />
+            </Field>
+            <Field label="Periodicidad">
+              <select className="input" value={frequency} onChange={(e) => setFrequency(e.target.value as "monthly" | "annual")}>
+                <option value="monthly">Mensual</option>
+                <option value="annual">Anual</option>
+              </select>
             </Field>
             <Field label="Categoría">
               <select
@@ -2271,6 +2291,16 @@ function RecurringExpensesPage() {
                 onChange={(e) => setDay(e.target.value)}
               />
             </Field>
+            {frequency === "annual" && (
+              <Field label="Mes habitual de pago">
+                <select className="input" value={month} onChange={(e) => setMonth(e.target.value)}>
+                  {[
+                    "Enero", "Febrero", "Marzo", "Abril", "Mayo", "Junio",
+                    "Julio", "Agosto", "Septiembre", "Octubre", "Noviembre", "Diciembre",
+                  ].map((name, index) => <option key={name} value={index + 1}>{name}</option>)}
+                </select>
+              </Field>
+            )}
             <Field label="Cuenta de origen (opcional)">
               <select
                 className="input"
@@ -2306,12 +2336,12 @@ function RecurringExpensesPage() {
             <p className="mt-1 text-2xl font-bold text-white">
               {money(item.amountCents)}
               <span className="ml-1 text-sm font-normal text-slate-500">
-                / mes
+                / {item.frequency === "annual" ? "año" : "mes"}
               </span>
             </p>
             {item.description && <p className="mt-2 text-xs text-slate-400">{item.description}</p>}
             <p className="mt-4 text-xs text-slate-500">
-              {item.category} · Día habitual: {item.dayOfMonth}
+              {item.category} · {item.frequency === "annual" ? `Pago anual: ${item.dayOfMonth}/${item.monthOfYear}` : `Día habitual: ${item.dayOfMonth}`}
             </p>
             <div className="mt-5 flex gap-2">
               <button className="btn-ghost" onClick={() => startEdit(item)}><Pencil size={15} /> Editar</button>
@@ -2325,7 +2355,7 @@ function RecurringExpensesPage() {
           <Empty
             icon={ArrowUpRight}
             title="Aún no registras gastos fijos"
-            text="Agrega internet, transporte u otros compromisos mensuales para reservarlos correctamente."
+            text="Agrega internet, transporte, firmas electrónicas u otros compromisos mensuales o anuales."
           />
         </div>
       )}
@@ -2801,7 +2831,7 @@ function Reports() {
       "RESUMEN",
       "Gastos fijos comprometidos USD",
       (summary.fixedExpenseCents / 100).toFixed(2),
-      "Plan mensual, aún no pagado",
+      "Reserva mensual equivalente; incluye gastos anuales prorrateados",
     );
     add(
       "RESUMEN",
@@ -2847,7 +2877,7 @@ function Reports() {
         "GASTOS FIJOS",
         item.concept,
         (item.amountCents / 100).toFixed(2),
-        `${item.category} · mensual · día ${item.dayOfMonth ?? ""} · ${item.active ? "Activo" : "Inactivo"}`,
+        `${item.category} · ${item.frequency === "annual" ? `anual · día ${item.dayOfMonth ?? ""}/${item.monthOfYear ?? ""}` : `mensual · día ${item.dayOfMonth ?? ""}`} · ${item.active ? "Activo" : "Inactivo"}`,
       ),
     );
     goals.forEach((goal) =>
@@ -2912,7 +2942,7 @@ function Reports() {
     );
     const expenseLines = recurringExpenses.map(
       (item) =>
-        `- ${item.concept}: ${money(item.amountCents)}/mes | ${item.category} | día ${item.dayOfMonth ?? "no definido"} | ${item.active ? "activo" : "inactivo"}${item.description ? ` | ${item.description}` : ""}`,
+        `- ${item.concept}: ${money(item.amountCents)}/${item.frequency === "annual" ? "año" : "mes"} | ${item.category} | ${item.frequency === "annual" ? `pago ${item.dayOfMonth ?? "no definido"}/${item.monthOfYear ?? "no definido"}` : `día ${item.dayOfMonth ?? "no definido"}`} | ${item.active ? "activo" : "inactivo"}${item.description ? ` | ${item.description}` : ""}`,
     );
     const goalLines = goals.map(
       (goal) =>
@@ -2961,7 +2991,7 @@ RESUMEN ACTUAL
 - Ahorro real del mes: ${money(summary.monthSavingsCents)}
 - Intereses acreditados registrados: ${money(summary.interestCents)}
 - Ingresos fijos esperados al mes: ${money(summary.expectedIncomeCents)}
-- Gastos fijos comprometidos al mes: ${money(summary.fixedExpenseCents)}
+- Gastos fijos comprometidos al mes (incluye anuales prorrateados): ${money(summary.fixedExpenseCents)}
 
 CUENTAS Y LIQUIDEZ
 ${accountLines.join("\n") || "No hay cuentas registradas."}

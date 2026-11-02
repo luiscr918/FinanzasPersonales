@@ -360,10 +360,14 @@ export function FinanceProvider({ children }: { children: ReactNode }) {
   };
   const addRecurringExpense = async (value: Omit<RecurringExpense, "id">) => {
     if (!user) return;
-    const { description, ...fields } = value;
+    const { description, monthOfYear, ...fields } = value;
     await addDoc(
       path(user.uid, "recurringExpenses"),
-      description ? { ...fields, description } : fields,
+      {
+        ...fields,
+        ...(monthOfYear ? { monthOfYear } : {}),
+        ...(description ? { description } : {}),
+      },
     );
     await refresh();
   };
@@ -372,9 +376,10 @@ export function FinanceProvider({ children }: { children: ReactNode }) {
     value: Omit<RecurringExpense, "id">,
   ) => {
     if (!user) return;
-    const { description, ...fields } = value;
+    const { description, monthOfYear, ...fields } = value;
     await updateDoc(doc(db, "users", user.uid, "recurringExpenses", id), {
       ...fields,
+      monthOfYear: monthOfYear ?? deleteField(),
       description: description || deleteField(),
     });
     await refresh();
@@ -415,7 +420,14 @@ export function FinanceProvider({ children }: { children: ReactNode }) {
       .reduce((sum, item) => sum + item.amountCents, 0);
     const fixedExpenseCents = recurringExpenses
       .filter((item) => item.active)
-      .reduce((sum, item) => sum + item.amountCents, 0);
+      .reduce(
+        (sum, item) =>
+          sum +
+          (item.frequency === "annual"
+            ? Math.round(item.amountCents / 12)
+            : item.amountCents),
+        0,
+      );
     return {
       bankBalanceCents,
       thirdPartyBalanceCents,

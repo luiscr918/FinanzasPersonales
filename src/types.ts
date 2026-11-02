@@ -108,8 +108,9 @@ export interface RecurringExpense {
   concept: string;
   amountCents: number;
   category: string;
-  frequency: "monthly";
+  frequency: "monthly" | "annual";
   dayOfMonth?: number;
+  monthOfYear?: number;
   accountId?: string;
   active: boolean;
   description?: string;
