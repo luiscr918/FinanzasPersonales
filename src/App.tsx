@@ -20,6 +20,7 @@ import {
   YAxis,
 } from "recharts";
 import Swal from "sweetalert2";
+import { Timestamp } from "firebase/firestore";
 import {
   ArrowDownLeft,
   ArrowLeftRight,
@@ -63,6 +64,7 @@ import {
   money,
   type Account,
   type Movement,
+  type Project,
 } from "./types";
 import { dateInputValue } from "./lib/format";
 import { firebaseConfigured } from "./lib/firebase";
@@ -888,36 +890,94 @@ function GoalBar({
 }
 
 function Accounts() {
-  const { accounts, addAccount, movements } = useFinance();
+  const { accounts, addAccount, updateAccount, movements } = useFinance();
   const [form, setForm] = useState(false);
+  const [editing, setEditing] = useState<Account | null>(null);
   const [name, setName] = useState("");
   const [bank, setBank] = useState("Banco Pichincha");
   const [product, setProduct] =
     useState<Account["product"]>("standard_savings");
   const [balance, setBalance] = useState("");
   const [rate, setRate] = useState("");
+  const [description, setDescription] = useState("");
+  const [withdrawalMode, setWithdrawalMode] = useState<"free" | "restricted">("free");
+  const [withdrawalUntil, setWithdrawalUntil] = useState("");
+  const resetForm = () => {
+    setName("");
+    setBank("Banco Pichincha");
+    setProduct("standard_savings");
+    setBalance("");
+    setRate("");
+    setDescription("");
+    setWithdrawalMode("free");
+    setWithdrawalUntil("");
+    setEditing(null);
+    setForm(false);
+  };
+  const startEdit = (account: Account) => {
+    setEditing(account);
+    setName(account.name);
+    setBank(account.bank);
+    setProduct(account.product);
+    const movementEffectCents = movements
+      .filter((movement) => movement.accountId === account.id)
+      .reduce((sum, movement) => sum + movement.accountEffectCents, 0);
+    const currentBalanceCents = account.openingBalanceCents + movementEffectCents;
+    setBalance((currentBalanceCents / 100).toFixed(2));
+    setRate(
+      account.interestAnnualBps
+        ? (account.interestAnnualBps / 100).toFixed(2)
+        : "",
+    );
+    setDescription(account.description ?? "");
+    setWithdrawalMode(account.withdrawalMode ?? "free");
+    setWithdrawalUntil(
+      account.withdrawalUntil?.toDate().toISOString().slice(0, 10) ?? "",
+    );
+    setForm(true);
+  };
   const submit = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!name || !bank) return;
-    await addAccount({
+    const movementEffectCents = editing
+      ? movements
+          .filter((movement) => movement.accountId === editing.id)
+          .reduce((sum, movement) => sum + movement.accountEffectCents, 0)
+      : 0;
+    const desiredBalanceCents = centsFromInput(balance || "0");
+    const value: Omit<Account, "id"> = {
       name,
       bank,
-      type: product === "cash" ? "cash" : "savings",
+      type:
+        product === "cash"
+          ? "cash"
+          : product === "checking"
+            ? "checking"
+            : "savings",
       product,
-      openingBalanceCents: centsFromInput(balance || "0"),
+      // On edit, preserve movement history and change only the opening base.
+      openingBalanceCents: editing
+        ? desiredBalanceCents - movementEffectCents
+        : desiredBalanceCents,
       interestAnnualBps:
         product === "interest_savings"
           ? Math.round(Number(rate || "0") * 100)
           : 0,
-      active: true,
-    });
-    setName("");
-    setBalance("");
-    setRate("");
-    setForm(false);
+      active: editing?.active ?? true,
+      description: description || undefined,
+      withdrawalMode,
+      withdrawalUntil:
+        withdrawalMode === "restricted" && withdrawalUntil
+          ? Timestamp.fromDate(new Date(`${withdrawalUntil}T12:00:00`))
+          : undefined,
+    };
+    if (editing) await updateAccount(editing.id, value);
+    else await addAccount(value);
+    const wasEditing = Boolean(editing);
+    resetForm();
     await Swal.fire({
       icon: "success",
-      title: "Cuenta agregada",
+      title: wasEditing ? "Cuenta actualizada" : "Cuenta agregada",
       timer: 1300,
       showConfirmButton: false,
       background: "#101c2c",
@@ -939,9 +999,9 @@ function Accounts() {
       />
       {form && (
         <FormCard
-          title="Agregar cuenta"
+          title={editing ? "Editar cuenta" : "Agregar cuenta"}
           onSubmit={submit}
-          onCancel={() => setForm(false)}
+          onCancel={resetForm}
         >
           <div className="grid gap-4 sm:grid-cols-2">
             <Field label="Nombre identificador">
@@ -997,16 +1057,36 @@ function Accounts() {
                 </p>
               </Field>
             )}
-            <Field label="Saldo inicial (USD)">
+            <Field label="Disponibilidad del dinero">
+              <select className="input" value={withdrawalMode} onChange={(e) => setWithdrawalMode(e.target.value as typeof withdrawalMode)}>
+                <option value="free">Retiro libre</option>
+                <option value="restricted">Retiro restringido</option>
+              </select>
+            </Field>
+            {withdrawalMode === "restricted" && (
+              <Field label="Disponible para retirar desde">
+                <input className="input" type="date" required value={withdrawalUntil} onChange={(e) => setWithdrawalUntil(e.target.value)} />
+              </Field>
+            )}
+            <Field label={`${editing ? "Saldo actual" : "Saldo inicial"} (USD)`}>
               <input
                 className="input"
                 type="number"
-                min="0"
+                 min={editing ? undefined : "0"}
                 step="0.01"
                 value={balance}
                 onChange={(e) => setBalance(e.target.value)}
                 placeholder="0.00"
               />
+              {editing && (
+                <p className="mt-1 text-xs text-slate-500">
+                  Se conservarán los movimientos existentes y este valor será el
+                  nuevo saldo calculado de la cuenta.
+                </p>
+              )}
+            </Field>
+            <Field label="Descripción o notas (opcional)">
+              <input className="input" value={description} onChange={(e) => setDescription(e.target.value)} placeholder="Ahorro blindado, condiciones, etc." />
             </Field>
           </div>
         </FormCard>
@@ -1047,12 +1127,18 @@ function Accounts() {
                   {movements.filter((m) => m.accountId === a.id).length}{" "}
                   movimientos
                 </span>
-                <span>
-                  {a.product === "interest_savings"
-                    ? `${(a.interestAnnualBps / 100).toFixed(2)}% anual referencial · retiro libre`
-                    : "Sin intereses configurados"}
-                </span>
-              </div>
+                 <span>
+                   {a.product === "interest_savings"
+                     ? `${(a.interestAnnualBps / 100).toFixed(2)}% anual referencial · ${a.withdrawalMode === "restricted" ? `restringido${a.withdrawalUntil ? ` hasta ${a.withdrawalUntil.toDate().toLocaleDateString("es-EC")}` : ""}` : "retiro libre"}`
+                     : a.withdrawalMode === "restricted"
+                       ? `Retiro restringido${a.withdrawalUntil ? ` hasta ${a.withdrawalUntil.toDate().toLocaleDateString("es-EC")}` : ""}`
+                       : "Sin intereses configurados"}
+                 </span>
+               </div>
+               {a.description && <p className="mt-3 text-xs text-slate-400">{a.description}</p>}
+               <button className="btn-ghost mt-4" onClick={() => startEdit(a)}>
+                 <Pencil size={15} /> Editar cuenta
+               </button>
             </div>
           );
         })}
@@ -1129,7 +1215,12 @@ function Movements() {
   } = useFinance();
   const [form, setForm] = useState(false);
   const [kind, setKind] = useState<
-    "income" | "expense" | "transfer" | "third_party_in" | "third_party_out"
+    | "income"
+    | "expense"
+    | "interest"
+    | "transfer"
+    | "third_party_in"
+    | "third_party_out"
   >("expense");
   const [amount, setAmount] = useState("");
   const [accountId, setAccountId] = useState("");
@@ -1228,6 +1319,7 @@ function Movements() {
               >
                 <option value="expense">Gasto personal</option>
                 <option value="income">Ingreso personal</option>
+                <option value="interest">Interés acreditado</option>
                 <option value="transfer">
                   Transferencia entre mis cuentas
                 </option>
@@ -1697,125 +1789,220 @@ function ThirdParties() {
 }
 
 function Goals() {
-  const { goals, addGoal } = useFinance();
+  const { goals, accounts, addGoal, updateGoal, deleteGoal, addTransfer } = useFinance();
   const [form, setForm] = useState(false);
+  const [editing, setEditing] = useState<(typeof goals)[number] | null>(null);
+  const [contributing, setContributing] = useState<(typeof goals)[number] | null>(null);
   const [name, setName] = useState("");
   const [target, setTarget] = useState("");
-  const submit = async (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!name || !target) return;
-    await addGoal({ name, targetCents: centsFromInput(target), savedCents: 0 });
+  const [accountId, setAccountId] = useState("");
+  const [description, setDescription] = useState("");
+  const [contribution, setContribution] = useState("");
+  const [contributionMode, setContributionMode] = useState<"virtual" | "transfer">("virtual");
+  const [sourceAccountId, setSourceAccountId] = useState("");
+  const resetForm = () => {
     setName("");
     setTarget("");
+    setAccountId("");
+    setDescription("");
+    setEditing(null);
     setForm(false);
+  };
+  const startEdit = (goal: (typeof goals)[number]) => {
+    setEditing(goal);
+    setName(goal.name);
+    setTarget((goal.targetCents / 100).toFixed(2));
+    setAccountId(goal.accountId ?? "");
+    setDescription(goal.description ?? "");
+    setForm(true);
+  };
+  const submit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    const targetCents = centsFromInput(target);
+    if (!name || targetCents <= 0) return;
+    const value = {
+      name,
+      targetCents,
+      savedCents: editing?.savedCents ?? 0,
+      accountId: accountId || undefined,
+      description: description || undefined,
+    };
+    if (editing) await updateGoal(editing.id, value);
+    else await addGoal(value);
+    resetForm();
+  };
+  const contribute = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!contributing) return;
+    const amountCents = centsFromInput(contribution);
+    if (amountCents <= 0) return;
+    if (contributionMode === "transfer") {
+      if (!contributing.accountId || !sourceAccountId || sourceAccountId === contributing.accountId) return;
+      await addTransfer(sourceAccountId, contributing.accountId, amountCents, new Date(), `Aporte al objetivo: ${contributing.name}`);
+    }
+    await updateGoal(contributing.id, {
+      name: contributing.name,
+      targetCents: contributing.targetCents,
+      savedCents: contributing.savedCents + amountCents,
+      accountId: contributing.accountId,
+      description: contributing.description,
+    });
+    setContributing(null);
+    setContribution("");
+  };
+  const remove = async (goal: (typeof goals)[number]) => {
+    const result = await Swal.fire({
+      title: "¿Eliminar objetivo?",
+      text: "Solo se elimina la meta virtual; no se borran movimientos ni transferencias.",
+      icon: "warning",
+      showCancelButton: true,
+      confirmButtonText: "Eliminar",
+      cancelButtonText: "Cancelar",
+      confirmButtonColor: "#ef6b78",
+      background: "#101c2c",
+      color: "#fff",
+    });
+    if (result.isConfirmed) await deleteGoal(goal.id);
   };
   return (
     <>
       <PageIntro
         eyebrow="Dirección"
         title="Objetivos financieros"
-        text="Convierte el dinero que ya tienes en prioridades visibles, sin duplicar tu patrimonio."
-        action={
-          <button className="btn-primary" onClick={() => setForm(!form)}>
-            <Plus size={17} />
-            Nuevo objetivo
-          </button>
-        }
+        text="Metas personales de ahorro. Crear una meta no mueve dinero; los aportes pueden ser virtuales o una transferencia confirmada."
+        action={<button className="btn-primary" onClick={() => (form ? resetForm() : setForm(true))}><Plus size={17} /> Nuevo objetivo</button>}
       />
       {form && (
-        <FormCard
-          title="Crear objetivo"
-          onSubmit={submit}
-          onCancel={() => setForm(false)}
-        >
+        <FormCard title={editing ? "Editar objetivo" : "Crear objetivo"} onSubmit={submit} onCancel={resetForm}>
           <div className="grid gap-4 sm:grid-cols-2">
-            <Field label="Nombre">
-              <input
-                className="input"
-                required
-                value={name}
-                onChange={(e) => setName(e.target.value)}
-                placeholder="Fondo de emergencia"
-              />
-            </Field>
-            <Field label="Monto objetivo (USD)">
-              <input
-                className="input"
-                required
-                type="number"
-                min="1"
-                step="0.01"
-                value={target}
-                onChange={(e) => setTarget(e.target.value)}
-                placeholder="500.00"
-              />
-            </Field>
+            <Field label="Nombre"><input className="input" required value={name} onChange={(e) => setName(e.target.value)} placeholder="Fondo de emergencia" /></Field>
+            <Field label="Monto objetivo (USD)"><input className="input" required type="number" min="1" step="0.01" value={target} onChange={(e) => setTarget(e.target.value)} placeholder="500.00" /></Field>
+            <Field label="Cuenta asociada (opcional)"><select className="input" value={accountId} onChange={(e) => setAccountId(e.target.value)}><option value="">Solo seguimiento virtual</option>{accounts.map((a) => <option key={a.id} value={a.id}>{a.name}</option>)}</select></Field>
+            <Field label="Descripción (opcional)"><input className="input" value={description} onChange={(e) => setDescription(e.target.value)} placeholder="Meta para imprevistos" /></Field>
+          </div>
+        </FormCard>
+      )}
+      {contributing && (
+        <FormCard title={`Aportar a ${contributing.name}`} onSubmit={contribute} onCancel={() => setContributing(null)}>
+          <div className="grid gap-4 sm:grid-cols-2">
+            <Field label="Monto del aporte (USD)"><input className="input" required type="number" min="0.01" step="0.01" value={contribution} onChange={(e) => setContribution(e.target.value)} placeholder="50.00" /></Field>
+            <Field label="Tipo de aporte"><select className="input" value={contributionMode} onChange={(e) => setContributionMode(e.target.value as typeof contributionMode)}><option value="virtual">Asignación virtual, sin mover saldo</option><option value="transfer" disabled={!contributing.accountId}>Transferencia real a la cuenta asociada</option></select></Field>
+            {contributionMode === "transfer" && <Field label="Cuenta de origen"><select className="input" required value={sourceAccountId} onChange={(e) => setSourceAccountId(e.target.value)}><option value="">Selecciona una cuenta</option>{accounts.filter((a) => a.id !== contributing.accountId).map((a) => <option key={a.id} value={a.id}>{a.name}</option>)}</select></Field>}
           </div>
         </FormCard>
       )}
       <div className="grid gap-4 md:grid-cols-2">
         {goals.map((g) => (
           <div className="panel p-6" key={g.id}>
-            <div className="mb-7 flex items-start justify-between">
-              <div className="rounded-2xl bg-mint/10 p-3 text-mint">
-                <Goal />
-              </div>
-              <span className="text-xs text-slate-500">Asignación virtual</span>
-            </div>
+            <div className="mb-7 flex items-start justify-between"><div className="rounded-2xl bg-mint/10 p-3 text-mint"><Goal /></div><span className="text-xs text-slate-500">{g.accountId ? "Cuenta asociada" : "Asignación virtual"}</span></div>
             <h3 className="text-lg font-semibold text-white">{g.name}</h3>
-            <p className="mt-1 text-sm text-slate-500">
-              {money(g.targetCents - g.savedCents)} restantes para llegar a tu
-              meta
-            </p>
-            <div className="mt-6">
-              <GoalBar goal={g} />
-            </div>
+            <p className="mt-1 text-sm text-slate-500">{money(Math.max(0, g.targetCents - g.savedCents))} restantes para llegar a tu meta</p>
+            <div className="mt-6"><GoalBar goal={g} /></div>
+            {g.description && <p className="mt-3 text-xs text-slate-400">{g.description}</p>}
+            <div className="mt-5 flex flex-wrap gap-2"><button className="btn-primary" onClick={() => { setContributing(g); setContributionMode("virtual"); setSourceAccountId(""); }}><Plus size={15} /> Registrar aporte</button><button className="btn-ghost" onClick={() => startEdit(g)}><Pencil size={15} /> Editar</button><button className="btn-ghost text-rose-300" onClick={() => void remove(g)}><Trash2 size={15} /> Eliminar</button></div>
           </div>
         ))}
       </div>
-      {!goals.length && (
-        <div className="panel">
-          <Empty
-            icon={Target}
-            title="Todavía no tienes objetivos"
-            text="Empieza por algo concreto: fondo de emergencia, tecnología o capital para un proyecto."
-          />
-        </div>
-      )}
+      {!goals.length && <div className="panel"><Empty icon={Target} title="Todavía no tienes objetivos" text="Empieza por algo concreto: fondo de emergencia, tecnología o capital para un proyecto." /></div>}
     </>
   );
 }
 
 function RecurringIncomePage() {
-  const { recurringIncome, addRecurringIncome, accounts } = useFinance();
+  const {
+    recurringIncome,
+    addRecurringIncome,
+    updateRecurringIncome,
+    deleteRecurringIncome,
+    addMovement,
+    accounts,
+  } = useFinance();
   const [form, setForm] = useState(false);
+  const [editing, setEditing] = useState<(typeof recurringIncome)[number] | null>(null);
+  const [receiving, setReceiving] = useState<(typeof recurringIncome)[number] | null>(null);
   const [concept, setConcept] = useState("");
   const [amount, setAmount] = useState("");
   const [day, setDay] = useState("1");
   const [accountId, setAccountId] = useState("");
+  const [description, setDescription] = useState("");
+  const [receivedAmount, setReceivedAmount] = useState("");
+  const [receivedDate, setReceivedDate] = useState(dateInputValue());
+  const [receivedAccountId, setReceivedAccountId] = useState("");
+  const resetForm = () => {
+    setConcept("");
+    setAmount("");
+    setDay("1");
+    setAccountId("");
+    setDescription("");
+    setEditing(null);
+    setForm(false);
+  };
+  const startEdit = (item: (typeof recurringIncome)[number]) => {
+    setEditing(item);
+    setConcept(item.concept);
+    setAmount((item.amountCents / 100).toFixed(2));
+    setDay(String(item.dayOfMonth ?? 1));
+    setAccountId(item.accountId ?? "");
+    setDescription(item.description ?? "");
+    setForm(true);
+  };
   const submit = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!concept || !amount) return;
-    await addRecurringIncome({
+    const amountCents = centsFromInput(amount);
+    const value = {
       concept,
-      amountCents: centsFromInput(amount),
+      amountCents,
       frequency: "monthly",
       dayOfMonth: Number(day),
       accountId: accountId || undefined,
-      active: true,
-    });
-    setConcept("");
-    setAmount("");
-    setForm(false);
+      active: editing?.active ?? true,
+      description: description || undefined,
+    } as const;
+    if (!concept || !amount || amountCents <= 0 || Number(day) < 1 || Number(day) > 31) return;
+    if (editing) await updateRecurringIncome(editing.id, value);
+    else await addRecurringIncome(value);
+    resetForm();
     await Swal.fire({
       icon: "success",
-      title: "Ingreso fijo guardado",
+      title: editing ? "Ingreso fijo actualizado" : "Ingreso fijo guardado",
       text: "Quedará como esperado y no alterará tu saldo hasta registrarlo como recibido.",
       timer: 1800,
       showConfirmButton: false,
       background: "#101c2c",
       color: "#fff",
     });
+  };
+  const remove = async (item: (typeof recurringIncome)[number]) => {
+    const result = await Swal.fire({
+      title: "¿Eliminar ingreso fijo?",
+      text: "Solo se eliminará este recordatorio. Los movimientos reales permanecerán intactos.",
+      icon: "warning",
+      showCancelButton: true,
+      confirmButtonText: "Eliminar",
+      cancelButtonText: "Cancelar",
+      confirmButtonColor: "#ef6b78",
+      background: "#101c2c",
+      color: "#fff",
+    });
+    if (result.isConfirmed) await deleteRecurringIncome(item.id);
+  };
+  const receive = async (e: React.FormEvent) => {
+    e.preventDefault();
+    const amountCents = centsFromInput(receivedAmount);
+    if (!receiving || amountCents <= 0 || !receivedAccountId) return;
+    await addMovement({
+      type: "income",
+      amountCents,
+      accountId: receivedAccountId,
+      category: "Otros",
+      description: `Ingreso recibido: ${receiving.concept}`,
+      date: new Date(`${receivedDate}T12:00:00`),
+      accountEffectCents: amountCents,
+      personalEffectCents: amountCents,
+      thirdPartyEffectCents: 0,
+    });
+    setReceiving(null);
+    await Swal.fire({ icon: "success", title: "Ingreso recibido registrado", timer: 1400, showConfirmButton: false, background: "#101c2c", color: "#fff" });
   };
   return (
     <>
@@ -1824,7 +2011,7 @@ function RecurringIncomePage() {
         title="Ingresos fijos"
         text="Registra ingresos esperados, como tus pasantías, sin convertirlos automáticamente en dinero disponible."
         action={
-          <button className="btn-primary" onClick={() => setForm(!form)}>
+          <button className="btn-primary" onClick={() => { if (form) resetForm(); else setForm(true); }}>
             <Plus size={17} />
             Nuevo ingreso fijo
           </button>
@@ -1832,9 +2019,9 @@ function RecurringIncomePage() {
       />
       {form && (
         <FormCard
-          title="Nuevo ingreso fijo"
+          title={editing ? "Editar ingreso fijo" : "Nuevo ingreso fijo"}
           onSubmit={submit}
-          onCancel={() => setForm(false)}
+          onCancel={resetForm}
         >
           <div className="grid gap-4 sm:grid-cols-2">
             <Field label="Concepto">
@@ -1882,6 +2069,18 @@ function RecurringIncomePage() {
                 ))}
               </select>
             </Field>
+            <Field label="Descripción (opcional)">
+              <input className="input" value={description} onChange={(e) => setDescription(e.target.value)} placeholder="Sueldo, beca, etc." />
+            </Field>
+          </div>
+        </FormCard>
+      )}
+      {receiving && (
+        <FormCard title={`Registrar ingreso recibido: ${receiving.concept}`} onSubmit={receive} onCancel={() => setReceiving(null)}>
+          <div className="grid gap-4 sm:grid-cols-3">
+            <Field label="Monto recibido (USD)"><input className="input" type="number" min="0.01" step="0.01" required value={receivedAmount} onChange={(e) => setReceivedAmount(e.target.value)} /></Field>
+            <Field label="Cuenta"><select className="input" required value={receivedAccountId} onChange={(e) => setReceivedAccountId(e.target.value)}><option value="">Selecciona una cuenta</option>{accounts.map((a) => <option key={a.id} value={a.id}>{a.name}</option>)}</select></Field>
+            <Field label="Fecha"><input className="input" type="date" required value={receivedDate} onChange={(e) => setReceivedDate(e.target.value)} /></Field>
           </div>
         </FormCard>
       )}
@@ -1892,8 +2091,8 @@ function RecurringIncomePage() {
               <div className="rounded-2xl bg-mint/10 p-3 text-mint">
                 <ArrowDownLeft />
               </div>
-              <span className="rounded-full bg-mint/10 px-2.5 py-1 text-[10px] font-bold uppercase tracking-wider text-mint">
-                Esperado
+              <span className={`rounded-full px-2.5 py-1 text-[10px] font-bold uppercase tracking-wider ${item.active ? "bg-mint/10 text-mint" : "bg-white/10 text-slate-400"}`}>
+                {item.active ? "Esperado" : "Pausado"}
               </span>
             </div>
             <h2 className="mt-6 font-semibold text-white">{item.concept}</h2>
@@ -1903,10 +2102,16 @@ function RecurringIncomePage() {
                 / mes
               </span>
             </p>
+            {item.description && <p className="mt-2 text-xs text-slate-400">{item.description}</p>}
             <p className="mt-4 text-xs text-slate-500">
               Día esperado: {item.dayOfMonth} ·{" "}
               {item.accountId ? "Cuenta asignada" : "Cuenta por elegir"}
             </p>
+            <div className="mt-5 flex flex-wrap gap-2">
+              <button className="btn-primary" onClick={() => { setReceiving(item); setReceivedAmount((item.amountCents / 100).toFixed(2)); setReceivedDate(dateInputValue()); setReceivedAccountId(item.accountId ?? accounts[0]?.id ?? ""); }}><ArrowDownLeft size={15} /> Registrar recibido</button>
+              <button className="btn-ghost" onClick={() => startEdit(item)}><Pencil size={15} /> Editar</button>
+              <button className="btn-ghost text-rose-300" onClick={() => void remove(item)}><Trash2 size={15} /> Eliminar</button>
+            </div>
           </div>
         ))}
       </div>
@@ -1924,37 +2129,81 @@ function RecurringIncomePage() {
 }
 
 function RecurringExpensesPage() {
-  const { recurringExpenses, addRecurringExpense, accounts, categories } =
-    useFinance();
+  const {
+    recurringExpenses,
+    addRecurringExpense,
+    updateRecurringExpense,
+    deleteRecurringExpense,
+    accounts,
+    categories,
+  } = useFinance();
   const [form, setForm] = useState(false);
+  const [editing, setEditing] = useState<(typeof recurringExpenses)[number] | null>(null);
   const [concept, setConcept] = useState("");
   const [amount, setAmount] = useState("");
   const [category, setCategory] = useState("Internet");
   const [day, setDay] = useState("1");
   const [accountId, setAccountId] = useState("");
+  const [description, setDescription] = useState("");
+  const resetForm = () => {
+    setConcept("");
+    setAmount("");
+    setCategory("Internet");
+    setDay("1");
+    setAccountId("");
+    setDescription("");
+    setEditing(null);
+    setForm(false);
+  };
+  const startEdit = (item: (typeof recurringExpenses)[number]) => {
+    setEditing(item);
+    setConcept(item.concept);
+    setAmount((item.amountCents / 100).toFixed(2));
+    setCategory(item.category);
+    setDay(String(item.dayOfMonth ?? 1));
+    setAccountId(item.accountId ?? "");
+    setDescription(item.description ?? "");
+    setForm(true);
+  };
   const submit = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!concept || !amount) return;
-    await addRecurringExpense({
+    const amountCents = centsFromInput(amount);
+    const value = {
       concept,
-      amountCents: centsFromInput(amount),
+      amountCents,
       category,
       frequency: "monthly",
       dayOfMonth: Number(day),
       accountId: accountId || undefined,
-      active: true,
-    });
-    setConcept("");
-    setAmount("");
-    setForm(false);
+      active: editing?.active ?? true,
+      description: description || undefined,
+    } as const;
+    if (!concept || !amount || amountCents <= 0 || Number(day) < 1 || Number(day) > 31) return;
+    if (editing) await updateRecurringExpense(editing.id, value);
+    else await addRecurringExpense(value);
+    resetForm();
     await Swal.fire({
       icon: "success",
-      title: "Gasto fijo guardado",
+      title: editing ? "Gasto fijo actualizado" : "Gasto fijo guardado",
       timer: 1400,
       showConfirmButton: false,
       background: "#101c2c",
       color: "#fff",
     });
+  };
+  const remove = async (item: (typeof recurringExpenses)[number]) => {
+    const result = await Swal.fire({
+      title: "¿Eliminar gasto fijo?",
+      text: "Solo se eliminará este recordatorio.",
+      icon: "warning",
+      showCancelButton: true,
+      confirmButtonText: "Eliminar",
+      cancelButtonText: "Cancelar",
+      confirmButtonColor: "#ef6b78",
+      background: "#101c2c",
+      color: "#fff",
+    });
+    if (result.isConfirmed) await deleteRecurringExpense(item.id);
   };
   return (
     <>
@@ -1963,7 +2212,7 @@ function RecurringExpensesPage() {
         title="Gastos fijos"
         text="Registra obligaciones mensuales para reservarlas en tus decisiones, sin crear un pago que todavía no ocurrió."
         action={
-          <button className="btn-primary" onClick={() => setForm(!form)}>
+          <button className="btn-primary" onClick={() => { if (form) resetForm(); else setForm(true); }}>
             <Plus size={17} />
             Nuevo gasto fijo
           </button>
@@ -1971,9 +2220,9 @@ function RecurringExpensesPage() {
       />
       {form && (
         <FormCard
-          title="Nuevo gasto fijo"
+          title={editing ? "Editar gasto fijo" : "Nuevo gasto fijo"}
           onSubmit={submit}
-          onCancel={() => setForm(false)}
+          onCancel={resetForm}
         >
           <div className="grid gap-4 sm:grid-cols-2">
             <Field label="Concepto">
@@ -2036,6 +2285,9 @@ function RecurringExpensesPage() {
                 ))}
               </select>
             </Field>
+            <Field label="Descripción (opcional)">
+              <input className="input" value={description} onChange={(e) => setDescription(e.target.value)} placeholder="Detalle del compromiso" />
+            </Field>
           </div>
         </FormCard>
       )}
@@ -2046,8 +2298,8 @@ function RecurringExpensesPage() {
               <div className="rounded-2xl bg-amber-300/10 p-3 text-amber-200">
                 <ArrowUpRight />
               </div>
-              <span className="rounded-full bg-amber-300/10 px-2.5 py-1 text-[10px] font-bold uppercase tracking-wider text-amber-200">
-                Compromiso
+              <span className={`rounded-full px-2.5 py-1 text-[10px] font-bold uppercase tracking-wider ${item.active ? "bg-amber-300/10 text-amber-200" : "bg-white/10 text-slate-400"}`}>
+                {item.active ? "Compromiso" : "Pausado"}
               </span>
             </div>
             <h2 className="mt-6 font-semibold text-white">{item.concept}</h2>
@@ -2057,9 +2309,14 @@ function RecurringExpensesPage() {
                 / mes
               </span>
             </p>
+            {item.description && <p className="mt-2 text-xs text-slate-400">{item.description}</p>}
             <p className="mt-4 text-xs text-slate-500">
               {item.category} · Día habitual: {item.dayOfMonth}
             </p>
+            <div className="mt-5 flex gap-2">
+              <button className="btn-ghost" onClick={() => startEdit(item)}><Pencil size={15} /> Editar</button>
+              <button className="btn-ghost text-rose-300" onClick={() => void remove(item)}><Trash2 size={15} /> Eliminar</button>
+            </div>
           </div>
         ))}
       </div>
@@ -2077,45 +2334,167 @@ function RecurringExpensesPage() {
 }
 
 function Projects() {
+  const { projects, accounts, people, movements, projectContributions, addProject, updateProject, deleteProject, addMovement, addProjectContribution } = useFinance();
+  const [form, setForm] = useState(false);
+  const [editing, setEditing] = useState<Project | null>(null);
+  const [entryProject, setEntryProject] = useState<Project | null>(null);
+  const [name, setName] = useState("");
+  const [budget, setBudget] = useState("");
+  const [status, setStatus] = useState<Project["status"]>("planned");
+  const [startDate, setStartDate] = useState("");
+  const [endDate, setEndDate] = useState("");
+  const [description, setDescription] = useState("");
+  const [participantIds, setParticipantIds] = useState<string[]>([]);
+  const [entryType, setEntryType] = useState<"expense" | "income">("expense");
+  const [entryAmount, setEntryAmount] = useState("");
+  const [entryAccountId, setEntryAccountId] = useState("");
+  const [entryDescription, setEntryDescription] = useState("");
+  const [contributionProject, setContributionProject] = useState<Project | null>(null);
+  const [contributionPersonId, setContributionPersonId] = useState("");
+  const [contributionAmount, setContributionAmount] = useState("");
+  const [contributionReceived, setContributionReceived] = useState(false);
+  const [contributionAccountId, setContributionAccountId] = useState("");
+  const resetForm = () => { setName(""); setBudget(""); setStatus("planned"); setStartDate(""); setEndDate(""); setDescription(""); setParticipantIds([]); setEditing(null); setForm(false); };
+  const startEdit = (project: Project) => {
+    setEditing(project);
+    setName(project.name);
+    setBudget((project.budgetCents / 100).toFixed(2));
+    setStatus(project.status);
+    setStartDate(project.startDate?.toDate().toISOString().slice(0, 10) ?? "");
+    setEndDate(project.endDate?.toDate().toISOString().slice(0, 10) ?? "");
+    setDescription(project.description ?? "");
+    setParticipantIds(project.participantIds ?? []);
+    setForm(true);
+  };
+  const submit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    const budgetCents = centsFromInput(budget || "0");
+    if (!name || budgetCents < 0) return;
+    const value = {
+      name,
+      budgetCents,
+      status,
+      participantIds,
+      startDate: startDate ? Timestamp.fromDate(new Date(`${startDate}T12:00:00`)) : undefined,
+      endDate: endDate ? Timestamp.fromDate(new Date(`${endDate}T12:00:00`)) : undefined,
+      description: description || undefined,
+    };
+    if (editing) await updateProject(editing.id, value);
+    else await addProject(value);
+    resetForm();
+  };
+  const saveContribution = async (e: React.FormEvent) => {
+    e.preventDefault();
+    const amountCents = centsFromInput(contributionAmount);
+    if (!contributionProject || amountCents <= 0) return;
+    if (contributionReceived && (!contributionPersonId || !contributionAccountId)) return;
+    let movementId: string | undefined;
+    if (contributionReceived) {
+      await addMovement({
+        type: "third_party_in",
+        amountCents,
+        accountId: contributionAccountId,
+        projectId: contributionProject.id,
+        personId: contributionPersonId,
+        category: "Otros",
+        description: `Aporte al proyecto: ${contributionProject.name}`,
+        date: new Date(),
+        accountEffectCents: amountCents,
+        personalEffectCents: 0,
+        thirdPartyEffectCents: amountCents,
+      });
+    }
+    await addProjectContribution({
+      projectId: contributionProject.id,
+      amountCents,
+      personId: contributionPersonId || undefined,
+      accountId: contributionReceived ? contributionAccountId : undefined,
+      movementId,
+      date: new Date(),
+      note: contributionReceived ? "Recibido en una cuenta propia" : "Aporte registrado sin movimiento bancario",
+    });
+    setContributionProject(null);
+    setContributionAmount("");
+    setContributionPersonId("");
+    setContributionReceived(false);
+  };
+  const saveEntry = async (e: React.FormEvent) => {
+    e.preventDefault();
+    const amountCents = centsFromInput(entryAmount);
+    if (!entryProject || amountCents <= 0 || !entryAccountId || !entryDescription) return;
+    const sign = entryType === "expense" ? -1 : 1;
+    await addMovement({
+      type: entryType,
+      amountCents,
+      accountId: entryAccountId,
+      projectId: entryProject.id,
+      category: entryType === "expense" ? "Otros" : "Otros",
+      description: entryDescription,
+      date: new Date(),
+      accountEffectCents: amountCents * sign,
+      personalEffectCents: amountCents * sign,
+      thirdPartyEffectCents: 0,
+    });
+    setEntryProject(null);
+    setEntryAmount("");
+    setEntryDescription("");
+  };
+  const remove = async (project: Project) => {
+    const result = await Swal.fire({ title: "¿Eliminar proyecto?", text: "Los movimientos vinculados se conservarán, pero dejarán de mostrar el proyecto.", icon: "warning", showCancelButton: true, confirmButtonText: "Eliminar", cancelButtonText: "Cancelar", confirmButtonColor: "#ef6b78", background: "#101c2c", color: "#fff" });
+    if (result.isConfirmed) await deleteProject(project.id);
+  };
+  const statusLabel = { planned: "Planeado", active: "Activo", paused: "Pausado", completed: "Terminado" };
   return (
     <>
-      <PageIntro
-        eyebrow="Capital con intención"
-        title="Proyectos compartidos"
-        text="Evalúa oportunidades como Meta Ads sin mezclar aportes de otras personas con tus ingresos."
-        action={
-          <button
-            className="btn-primary"
-            onClick={() =>
-              Swal.fire({
-                title: "Módulo en preparación",
-                text: "La estructura está lista para registrar participantes, aportes, gastos y resultados en la siguiente iteración.",
-                icon: "info",
-                background: "#101c2c",
-                color: "#fff",
-              })
-            }
-          >
-            <Plus size={17} />
-            Nuevo proyecto
-          </button>
-        }
-      />
-      <div className="panel p-6">
-        <div className="grid min-h-56 place-items-center text-center">
-          <div className="rounded-2xl bg-violet/10 p-4 text-violet">
-            <BriefcaseBusiness size={28} />
-          </div>
-          <h2 className="mt-4 text-lg font-semibold text-white">
-            Tu capital puede trabajar con contexto
-          </h2>
-          <p className="mt-2 max-w-md text-sm leading-6 text-slate-400">
-            Este módulo registrará cuánto aportas tú, cuánto aporta cada
-            participante y si el proyecto tiene capacidad de generar retorno.
-            Ninguna aportación externa se contará como ingreso personal.
-          </p>
+      <PageIntro eyebrow="Capital con intención" title="Proyectos" text="Controla iniciativas con presupuesto, gastos e ingresos propios sin mezclarlas con el análisis general." action={<button className="btn-primary" onClick={() => (form ? resetForm() : setForm(true))}><Plus size={17} /> Nuevo proyecto</button>} />
+      {form && <FormCard title={editing ? "Editar proyecto" : "Nuevo proyecto"} onSubmit={submit} onCancel={resetForm}>
+        <div className="grid gap-4 sm:grid-cols-2">
+          <Field label="Nombre"><input className="input" required value={name} onChange={(e) => setName(e.target.value)} placeholder="Campaña Meta Ads" /></Field>
+          <Field label="Presupuesto (USD)"><input className="input" required type="number" min="0" step="0.01" value={budget} onChange={(e) => setBudget(e.target.value)} placeholder="300.00" /></Field>
+          <Field label="Estado"><select className="input" value={status} onChange={(e) => setStatus(e.target.value as Project["status"])}><option value="planned">Planeado</option><option value="active">Activo</option><option value="paused">Pausado</option><option value="completed">Terminado</option></select></Field>
+          <Field label="Descripción (opcional)"><input className="input" value={description} onChange={(e) => setDescription(e.target.value)} placeholder="Objetivo y contexto del proyecto" /></Field>
+          <Field label="Fecha de inicio (opcional)"><input className="input" type="date" value={startDate} onChange={(e) => setStartDate(e.target.value)} /></Field>
+          <Field label="Fecha de finalización (opcional)"><input className="input" type="date" value={endDate} onChange={(e) => setEndDate(e.target.value)} /></Field>
+          <Field label="Participantes"><div className="space-y-2 rounded-xl border border-white/[.08] p-3">{people.length ? people.map((person) => <label className="flex items-center gap-2 text-sm text-slate-300" key={person.id}><input type="checkbox" checked={participantIds.includes(person.id)} onChange={(e) => setParticipantIds((current) => e.target.checked ? [...current, person.id] : current.filter((id) => id !== person.id))} />{person.name}</label>) : <p className="text-xs text-slate-500">Registra personas en la sección Dinero de terceros para agregarlas aquí.</p>}</div></Field>
         </div>
+      </FormCard>}
+      {entryProject && <FormCard title={`Registrar movimiento: ${entryProject.name}`} onSubmit={saveEntry} onCancel={() => setEntryProject(null)}>
+        <div className="grid gap-4 sm:grid-cols-2">
+          <Field label="Tipo"><select className="input" value={entryType} onChange={(e) => setEntryType(e.target.value as typeof entryType)}><option value="expense">Gasto del proyecto</option><option value="income">Ingreso del proyecto</option></select></Field>
+          <Field label="Monto (USD)"><input className="input" required type="number" min="0.01" step="0.01" value={entryAmount} onChange={(e) => setEntryAmount(e.target.value)} /></Field>
+          <Field label="Cuenta afectada"><select className="input" required value={entryAccountId} onChange={(e) => setEntryAccountId(e.target.value)}><option value="">Selecciona una cuenta</option>{accounts.map((a) => <option key={a.id} value={a.id}>{a.name}</option>)}</select></Field>
+          <Field label="Descripción"><input className="input" required value={entryDescription} onChange={(e) => setEntryDescription(e.target.value)} placeholder="Pago de publicidad" /></Field>
+        </div>
+      </FormCard>}
+      {contributionProject && <FormCard title={`Registrar aporte: ${contributionProject.name}`} onSubmit={saveContribution} onCancel={() => setContributionProject(null)}>
+        <div className="grid gap-4 sm:grid-cols-2">
+          <Field label="Quién aporta"><select className="input" value={contributionPersonId} onChange={(e) => setContributionPersonId(e.target.value)}><option value="">Yo</option>{people.filter((person) => (contributionProject.participantIds ?? []).includes(person.id)).map((person) => <option key={person.id} value={person.id}>{person.name}</option>)}</select></Field>
+          <Field label="Monto (USD)"><input className="input" required type="number" min="0.01" step="0.01" value={contributionAmount} onChange={(e) => setContributionAmount(e.target.value)} placeholder="10.00" /></Field>
+          <Field label="¿Entró a una cuenta tuya?"><select className="input" value={contributionReceived ? "yes" : "no"} onChange={(e) => setContributionReceived(e.target.value === "yes")}><option value="no">No, solo registrar aporte</option><option value="yes" disabled={!contributionPersonId}>Sí, registrar también como dinero de terceros</option></select></Field>
+          {contributionReceived && <Field label="Cuenta que recibió el dinero"><select className="input" required value={contributionAccountId} onChange={(e) => setContributionAccountId(e.target.value)}><option value="">Selecciona una cuenta</option>{accounts.map((a) => <option key={a.id} value={a.id}>{a.name}</option>)}</select></Field>}
+        </div>
+      </FormCard>}
+      <div className="grid gap-4 md:grid-cols-2">
+        {projects.map((project) => {
+          const linked = movements.filter((movement) => movement.projectId === project.id);
+          const expenses = Math.abs(linked.filter((movement) => movement.personalEffectCents < 0).reduce((sum, movement) => sum + movement.personalEffectCents, 0));
+          const income = linked.filter((movement) => movement.personalEffectCents > 0).reduce((sum, movement) => sum + movement.personalEffectCents, 0);
+          const result = income - expenses;
+          const contributions = projectContributions.filter((contribution) => contribution.projectId === project.id);
+          const ownContribution = contributions.filter((contribution) => !contribution.personId).reduce((sum, contribution) => sum + contribution.amountCents, 0);
+          const participantNames = (project.participantIds ?? []).map((id) => people.find((person) => person.id === id)?.name).filter(Boolean).join(", ");
+          return <div className="panel p-6" key={project.id}>
+            <div className="flex items-start justify-between"><div className="rounded-2xl bg-violet/10 p-3 text-violet"><BriefcaseBusiness /></div><span className="rounded-full bg-white/10 px-2.5 py-1 text-[10px] font-bold uppercase tracking-wider text-slate-300">{statusLabel[project.status]}</span></div>
+            <h2 className="mt-6 text-lg font-semibold text-white">{project.name}</h2>
+            {project.description && <p className="mt-1 text-xs text-slate-400">{project.description}</p>}
+            <p className="mt-2 text-xs text-slate-500">Participantes: {participantNames || "Solo tú"}</p>
+            <div className="mt-5 grid grid-cols-3 gap-3 text-xs"><div><p className="text-slate-500">Presupuesto</p><p className="mt-1 font-semibold text-white">{money(project.budgetCents)}</p></div><div><p className="text-slate-500">Gastado</p><p className="mt-1 font-semibold text-amber-200">{money(expenses)}</p></div><div><p className="text-slate-500">Resultado</p><p className={`mt-1 font-semibold ${result >= 0 ? "text-mint" : "text-rose-300"}`}>{money(result)}</p></div></div>
+            <p className="mt-3 text-xs text-slate-400">Aportes registrados: {money(contributions.reduce((sum, contribution) => sum + contribution.amountCents, 0))} · Tu aporte: {money(ownContribution)}</p>
+            <div className="mt-5 flex flex-wrap gap-2"><button className="btn-primary" onClick={() => { setEntryProject(project); setEntryAccountId(accounts[0]?.id ?? ""); }}><Plus size={15} /> Registrar movimiento</button><button className="btn-ghost" onClick={() => { setContributionProject(project); setContributionAccountId(accounts[0]?.id ?? ""); }}><Plus size={15} /> Registrar aporte</button><button className="btn-ghost" onClick={() => startEdit(project)}><Pencil size={15} /> Editar</button><button className="btn-ghost text-rose-300" onClick={() => void remove(project)}><Trash2 size={15} /> Eliminar</button></div>
+          </div>;
+        })}
       </div>
+      {!projects.length && <div className="panel"><Empty icon={BriefcaseBusiness} title="Todavía no tienes proyectos" text="Crea una iniciativa para controlar su presupuesto, gastos e ingresos por separado." /></div>}
     </>
   );
 }
@@ -2127,6 +2506,16 @@ const downloadCsv = (filename: string, headers: string[], rows: string[][]) => {
     .join("\n");
   const url = URL.createObjectURL(
     new Blob([`\ufeff${csv}`], { type: "text/csv;charset=utf-8;" }),
+  );
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = filename;
+  link.click();
+  URL.revokeObjectURL(url);
+};
+const downloadText = (filename: string, text: string) => {
+  const url = URL.createObjectURL(
+    new Blob([text], { type: "text/plain;charset=utf-8" }),
   );
   const link = document.createElement("a");
   link.href = url;
@@ -2325,6 +2714,8 @@ function Reports() {
     recurringIncome,
     recurringExpenses,
     goals,
+    projects,
+    projectContributions,
   } = useFinance();
   const accountName = (id: string) =>
     accounts.find((a) => a.id === id)?.name ?? "Cuenta no encontrada";
@@ -2467,6 +2858,13 @@ function Reports() {
         goal.description ?? "Asignación virtual",
       ),
     );
+    projects.forEach((project) => {
+      const linked = movements.filter((movement) => movement.projectId === project.id);
+      const contributions = projectContributions.filter((contribution) => contribution.projectId === project.id);
+      const expenses = Math.abs(linked.filter((movement) => movement.personalEffectCents < 0).reduce((sum, movement) => sum + movement.personalEffectCents, 0));
+      const income = linked.filter((movement) => movement.personalEffectCents > 0).reduce((sum, movement) => sum + movement.personalEffectCents, 0);
+      add("PROYECTOS", project.name, `Presupuesto ${(project.budgetCents / 100).toFixed(2)} · Aportes ${(contributions.reduce((sum, contribution) => sum + contribution.amountCents, 0) / 100).toFixed(2)} · Gastos ${(expenses / 100).toFixed(2)} · Resultado ${((income - expenses) / 100).toFixed(2)}`, `${project.status} · ${project.description ?? "Sin descripción"}`);
+    });
     movements.forEach((m) =>
       add(
         "MOVIMIENTOS",
@@ -2490,6 +2888,131 @@ function Reports() {
       color: "#fff",
     });
   };
+  const buildAiPrompt = () => {
+    const generatedAt = new Date().toLocaleDateString("es-EC");
+    const accountLines = accounts.map((a) => {
+      const balance =
+        a.openingBalanceCents +
+        movements
+          .filter((m) => m.accountId === a.id)
+          .reduce((sum, m) => sum + m.accountEffectCents, 0);
+      const restriction =
+        a.withdrawalMode === "restricted"
+          ? `Retiro restringido${a.withdrawalUntil ? ` hasta ${a.withdrawalUntil.toDate().toLocaleDateString("es-EC")}` : ""}`
+          : "Retiro libre";
+      return `- ${a.name}: ${money(balance)} | Banco: ${a.bank} | Producto: ${accountProductLabel(a.product)} | Tasa referencial: ${(a.interestAnnualBps / 100).toFixed(2)}% anual | ${restriction}${a.description ? ` | Notas: ${a.description}` : ""}`;
+    });
+    const movementLines = movements.map(
+      (m) =>
+        `- ${dateOf(m.date)} | ${m.type} | ${m.description} | ${money(m.amountCents)} | Cuenta: ${accountName(m.accountId)} | Efecto cuenta: ${money(m.accountEffectCents)} | Efecto personal: ${money(m.personalEffectCents)}${m.category ? ` | Categoría: ${m.category}` : ""}`,
+    );
+    const incomeLines = recurringIncome.map(
+      (item) =>
+        `- ${item.concept}: ${money(item.amountCents)}/mes | día ${item.dayOfMonth ?? "no definido"} | ${item.active ? "activo" : "inactivo"}${item.description ? ` | ${item.description}` : ""}`,
+    );
+    const expenseLines = recurringExpenses.map(
+      (item) =>
+        `- ${item.concept}: ${money(item.amountCents)}/mes | ${item.category} | día ${item.dayOfMonth ?? "no definido"} | ${item.active ? "activo" : "inactivo"}${item.description ? ` | ${item.description}` : ""}`,
+    );
+    const goalLines = goals.map(
+      (goal) =>
+        `- ${goal.name}: ${money(goal.savedCents)} ahorrados de ${money(goal.targetCents)}${goal.deadline ? ` | límite: ${goal.deadline.toDate().toLocaleDateString("es-EC")}` : ""}`,
+    );
+    const projectLines = projects.map((project) => {
+      const linked = movements.filter((movement) => movement.projectId === project.id);
+      const contributions = projectContributions.filter((contribution) => contribution.projectId === project.id);
+      const expenses = Math.abs(linked.filter((movement) => movement.personalEffectCents < 0).reduce((sum, movement) => sum + movement.personalEffectCents, 0));
+      const income = linked.filter((movement) => movement.personalEffectCents > 0).reduce((sum, movement) => sum + movement.personalEffectCents, 0);
+      const contributionLines = contributions.map((contribution) => {
+        const person = contribution.personId ? people.find((item) => item.id === contribution.personId)?.name ?? "Persona" : "Yo";
+        return `${person}: ${money(contribution.amountCents)}`;
+      });
+      return `- ${project.name}: presupuesto ${money(project.budgetCents)} | aportes ${money(contributions.reduce((sum, contribution) => sum + contribution.amountCents, 0))} (${contributionLines.join(", ") || "ninguno"}) | gastos ${money(expenses)} | ingresos ${money(income)} | resultado ${money(income - expenses)} | estado ${project.status}${project.description ? ` | ${project.description}` : ""}`;
+    });
+    const thirdPartyLines = people.map((person) => {
+      const pending = movements
+        .filter((m) => m.personId === person.id)
+        .reduce((sum, m) => sum + m.thirdPartyEffectCents, 0);
+      return `- ${person.name}: ${money(pending)} pendiente`;
+    });
+    return `Actúa como un analista financiero personal prudente y claro. No vendas productos financieros ni inventes información.
+
+Analiza mis finanzas personales con los datos siguientes y entrega recomendaciones prácticas.
+
+REGLAS DE INTERPRETACIÓN
+- No cuentes transferencias entre mis cuentas como ingresos ni gastos.
+- No cuentes dinero de terceros como patrimonio personal.
+- Diferencia ingresos reales de ingresos fijos esperados.
+- Diferencia intereses acreditados de tasas referenciales: una tasa no significa que ese rendimiento ya haya sido recibido.
+- Considera las restricciones de retiro de cada cuenta antes de evaluar mi liquidez.
+- Si faltan datos, dilo claramente y no los inventes.
+- No necesito asesoría legal, tributaria ni una garantía de rendimiento; señala cuándo debería consultar a un profesional.
+
+FECHA DEL INFORME
+${generatedAt}
+Moneda: USD
+
+RESUMEN ACTUAL
+- Patrimonio personal: ${money(summary.personalBalanceCents)}
+- Saldo bancario total: ${money(summary.bankBalanceCents)}
+- Dinero de terceros pendiente: ${money(summary.thirdPartyBalanceCents)}
+- Ingresos reales del mes: ${money(summary.monthIncomeCents)}
+- Gastos reales del mes: ${money(summary.monthExpenseCents)}
+- Ahorro real del mes: ${money(summary.monthSavingsCents)}
+- Intereses acreditados registrados: ${money(summary.interestCents)}
+- Ingresos fijos esperados al mes: ${money(summary.expectedIncomeCents)}
+- Gastos fijos comprometidos al mes: ${money(summary.fixedExpenseCents)}
+
+CUENTAS Y LIQUIDEZ
+${accountLines.join("\n") || "No hay cuentas registradas."}
+
+MOVIMIENTOS REALES
+${movementLines.join("\n") || "No hay movimientos registrados."}
+
+INGRESOS FIJOS ESPERADOS
+${incomeLines.join("\n") || "No hay ingresos fijos registrados."}
+
+GASTOS FIJOS COMPROMETIDOS
+${expenseLines.join("\n") || "No hay gastos fijos registrados."}
+
+OBJETIVOS
+${goalLines.join("\n") || "No hay objetivos registrados."}
+
+PROYECTOS
+${projectLines.join("\n") || "No hay proyectos registrados."}
+
+DINERO DE TERCEROS
+${thirdPartyLines.join("\n") || "No hay saldos de terceros registrados."}
+
+RESPONDE CON ESTAS SECCIONES
+1. Resumen ejecutivo de mi situación.
+2. Qué estoy haciendo bien.
+3. Qué estoy haciendo mal o qué debería mejorar.
+4. Análisis de liquidez, considerando el dinero restringido.
+5. Gastos y hábitos que debería revisar.
+6. Capacidad realista de ahorro mensual.
+7. Riesgos de concentración, dependencia o falta de liquidez.
+8. Recomendaciones priorizadas para los próximos 7 días, 30 días y 3 meses.
+9. Escenario conservador, escenario actual y escenario optimista.
+10. Datos faltantes y preguntas que debería responder.
+
+Sé específico con los montos disponibles, pero explica también los supuestos y las limitaciones del análisis.`;
+  };
+  const copyAiPrompt = async () => {
+    try {
+      await navigator.clipboard.writeText(buildAiPrompt());
+      await Swal.fire({ icon: "success", title: "Prompt copiado", text: "Ya puedes pegarlo en ChatGPT, Claude u otra IA.", timer: 1600, showConfirmButton: false, background: "#101c2c", color: "#fff" });
+    } catch {
+      await Swal.fire({ icon: "warning", title: "No se pudo copiar automáticamente", text: "Descarga el archivo de texto para usar el prompt.", background: "#101c2c", color: "#fff" });
+    }
+  };
+  const downloadAiPrompt = () => {
+    downloadText(
+      `prompt-financiero-${new Date().toISOString().slice(0, 10)}.txt`,
+      buildAiPrompt(),
+    );
+    void Swal.fire({ icon: "success", title: "Prompt descargado", timer: 1400, showConfirmButton: false, background: "#101c2c", color: "#fff" });
+  };
   return (
     <>
       <PageIntro
@@ -2505,6 +3028,9 @@ function Reports() {
             <button className="btn-primary" onClick={exportFullReport}>
               <Sparkles size={16} />
               Informe integral
+            </button>
+            <button className="btn-primary" onClick={() => void copyAiPrompt()}>
+              Copiar prompt IA
             </button>
           </div>
         }
@@ -2539,20 +3065,22 @@ function Reports() {
             </div>
             <div>
               <h2 className="font-semibold text-white">
-                Informe integral para análisis
+                Prompt financiero para análisis
               </h2>
               <p className="text-xs text-slate-500">
-                Cuentas, terceros, plan mensual, objetivos y movimientos.
+                Contexto listo para pegar en cualquier IA externa.
               </p>
             </div>
           </div>
           <p className="text-sm leading-6 text-slate-400">
-            Exporta un archivo separado por secciones para pedir recomendaciones
-            a una IA sin compartir credenciales ni configuración técnica.
+            Genera un análisis con saldos, movimientos, cuentas, intereses,
+            restricciones de retiro, objetivos y compromisos mensuales. No incluye
+            credenciales ni configuración técnica.
           </p>
-          <button className="btn-primary mt-5" onClick={exportFullReport}>
-            Descargar informe para IA
-          </button>
+          <div className="mt-5 flex flex-wrap gap-2">
+            <button className="btn-primary" onClick={() => void copyAiPrompt()}>Copiar prompt</button>
+            <button className="btn-ghost" onClick={downloadAiPrompt}>Descargar .txt</button>
+          </div>
         </div>
         <div className="panel p-6">
           <div className="mb-4 flex items-center gap-3">

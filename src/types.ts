@@ -9,6 +9,7 @@ export type MovementType =
   | "third_party_out"
   | "interest";
 export type AccountType = "checking" | "savings" | "cash";
+export type WithdrawalMode = "free" | "restricted";
 export type AccountProduct =
   | "standard_savings"
   | "interest_savings"
@@ -26,6 +27,8 @@ export interface Account {
   interestAnnualBps: number;
   active: boolean;
   description?: string;
+  withdrawalMode?: WithdrawalMode;
+  withdrawalUntil?: Timestamp;
 }
 
 export interface Movement {
@@ -43,6 +46,7 @@ export interface Movement {
   feeCents?: number;
   personId?: string;
   transferGroupId?: string;
+  projectId?: string;
 }
 
 export interface Goal {
@@ -53,6 +57,29 @@ export interface Goal {
   deadline?: Timestamp;
   accountId?: string;
   description?: string;
+}
+
+export type ProjectStatus = "planned" | "active" | "paused" | "completed";
+export interface Project {
+  id: string;
+  name: string;
+  budgetCents: number;
+  status: ProjectStatus;
+  participantIds?: string[];
+  startDate?: Timestamp;
+  endDate?: Timestamp;
+  description?: string;
+}
+
+export interface ProjectContribution {
+  id: string;
+  projectId: string;
+  amountCents: number;
+  date: Timestamp;
+  personId?: string;
+  accountId?: string;
+  movementId?: string;
+  note?: string;
 }
 
 export interface Person {
