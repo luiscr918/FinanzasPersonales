@@ -42,6 +42,7 @@ import {
   LayoutDashboard,
   LogOut,
   Menu,
+  Pencil,
   Plus,
   Receipt,
   Settings,
@@ -1373,6 +1374,64 @@ function ThirdParties() {
     movements
       .filter((m) => m.personId === id)
       .reduce((sum, m) => sum + m.thirdPartyEffectCents, 0);
+  const editPending = async (person: (typeof people)[number]) => {
+    const currentCents = pendingFor(person.id);
+    const result = await Swal.fire({
+      title: `Pendiente de ${person.name}`,
+      input: "number",
+      inputLabel: "Nuevo monto pendiente (USD)",
+      inputValue: (currentCents / 100).toFixed(2),
+      inputAttributes: { min: "0", step: "0.01" },
+      showCancelButton: true,
+      confirmButtonText: "Guardar monto",
+      cancelButtonText: "Cancelar",
+      background: "#101c2c",
+      color: "#fff",
+      preConfirm: (value) => {
+        const rawValue = String(value ?? "").trim();
+        const nextCents = centsFromInput(rawValue);
+        if (!rawValue || !Number.isFinite(nextCents) || nextCents < 0) {
+          Swal.showValidationMessage("Escribe un monto válido igual o mayor a 0.");
+          return undefined;
+        }
+        return nextCents;
+      },
+    });
+    if (!result.isConfirmed || typeof result.value !== "number") return;
+    const deltaCents = result.value - currentCents;
+    if (!deltaCents) return;
+    const latestMovement = movements.find((movement) => movement.personId === person.id);
+    const adjustmentAccountId = latestMovement?.accountId ?? accounts[0]?.id;
+    if (!adjustmentAccountId) {
+      await Swal.fire({
+        icon: "warning",
+        title: "No hay una cuenta disponible",
+        text: "Registra una cuenta antes de ajustar el saldo de esta persona.",
+        background: "#101c2c",
+        color: "#fff",
+      });
+      return;
+    }
+    await addMovement({
+      type: "third_party_reclassify",
+      amountCents: Math.abs(deltaCents),
+      accountId: adjustmentAccountId,
+      personId: person.id,
+      description: `Ajuste manual de saldo de ${person.name}`,
+      date: new Date(),
+      accountEffectCents: 0,
+      personalEffectCents: 0,
+      thirdPartyEffectCents: deltaCents,
+    });
+    await Swal.fire({
+      icon: "success",
+      title: "Saldo actualizado",
+      timer: 1400,
+      showConfirmButton: false,
+      background: "#101c2c",
+      color: "#fff",
+    });
+  };
   const savePerson = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!name) return;
@@ -1614,6 +1673,15 @@ function ThirdParties() {
                   {money(pendingFor(p.id))}
                 </p>
               </div>
+              <button
+                type="button"
+                className="btn-ghost self-start sm:self-auto"
+                onClick={() => void editPending(p)}
+                aria-label={`Editar monto pendiente de ${p.name}`}
+              >
+                <Pencil size={16} />
+                Editar monto
+              </button>
             </div>
           ))
         ) : (
